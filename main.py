@@ -76,7 +76,7 @@ def _check_deps() -> None:
 class InterviewAssistant:
     """Top-level orchestrator."""
 
-    def __init__(self) -> None:
+    def __init__(self, extension_factory=None) -> None:
         self._audio       = AudioCapture()
         self._gui         = InterviewAssistantGUI()
         self._listening   = False
@@ -103,6 +103,8 @@ class InterviewAssistant:
                                                             and generation == self._listening_generation)
         self._gui.root.protocol('WM_DELETE_WINDOW', self._close)
         self._gate_timer = self._gui.root.after(100, self._poll_question_gate)
+        if extension_factory is not None:
+            extension_factory(self._gui)
 
         # Populate device list
         devices = AudioCapture.list_devices()
@@ -291,6 +293,7 @@ class InterviewAssistant:
         self._stop_listening()
         self._transcriber.close()
         self._ai.close()
+        self._gui.close_extensions()
         self._gui._api_key_var.set('')
         self._gui._closing = True
         self._gui.root.destroy()
