@@ -31,9 +31,11 @@ def _gpu_info():
 
 class Transcriber:
     def __init__(self, language='zh', device='cpu', max_pending=2,
-                 on_metrics=None, on_error=None):
+                 on_metrics=None, on_error=None, reuse_resources=True):
         if language not in _MODELS or device not in ('cpu', 'cuda') or max_pending < 1:
             raise ValueError('Invalid ASR settings')
+        self.reuse_resources = bool(reuse_resources)
+        self.resource_reuse_active = False
         self.language, self._device = language, device
         self._model, self._loaded = None, False
         self._buffer: list[np.ndarray] = []
@@ -61,6 +63,8 @@ class Transcriber:
 
     def load_model(self, progress_callback=None):
         from funasr import AutoModel
+        from importlib.metadata import version, PackageNotFoundError
+        from funasr_runtime import enable_resource_reuse
         notify = progress_callback or (lambda _: None)
         description = _gpu_info() if self._device == 'cuda' else ''
         if self._device == 'cuda' and not description:
@@ -73,11 +77,18 @@ class Transcriber:
         except Exception:
             notify('可选 VAD/标点模型加载失败，正在尝试精简模式…')
             model = AutoModel(**options)
+        if self.reuse_resources and self.language in ('zh', 'en'):
+            try:
+                installed_version = version('funasr')
+            except PackageNotFoundError:
+                installed_version = ''
+            self.resource_reuse_active = enable_resource_reuse(model, installed_version)
         with self._state_lock:
             if self._closed.is_set():
                 return
             self._model, self._loaded = model, True
-        notify(f'✅ FunASR 模型加载完成 [{description or "CPU"}]，可以开始监听')
+        reuse_status = '资源复用已启用' if self.resource_reuse_active else '兼容模式'
+        notify(f'✅ FunASR 模型加载完成 [{description or "CPU"} / {reuse_status}]，可以开始监听')
 
     def process_chunk(self, chunk, on_transcript):
         with self._state_lock:

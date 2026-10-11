@@ -500,6 +500,7 @@ class InterviewAssistantGUI:
         tk.Label(row1, text="计算设备:", bg=C["base"], fg=C["text"],
                  font=("Helvetica", 10)).pack(side=tk.LEFT)
         self._compute_device_var = tk.StringVar(value=_default_compute_device())
+        self._reuse_resources_var = tk.BooleanVar(value=True)
         ttk.Combobox(
             row1, textvariable=self._compute_device_var,
             values=["cpu", "cuda"],
@@ -532,7 +533,7 @@ class InterviewAssistantGUI:
 
         tk.Label(row2, text="静音时长(s):", bg=C["base"], fg=C["text"],
                  font=("Helvetica", 9)).pack(side=tk.LEFT)
-        self._vad_silence_var = tk.DoubleVar(value=1.2)
+        self._vad_silence_var = tk.DoubleVar(value=.6)
         tk.Scale(
             row2, from_=0.3, to=3.0, resolution=0.1,
             orient=tk.HORIZONTAL, length=140,
@@ -551,6 +552,9 @@ class InterviewAssistantGUI:
             font=("Helvetica", 9),
         )
         self._hw_info_lbl.pack(side=tk.LEFT)
+        tk.Checkbutton(row3, text='复用模型资源（重载生效）', variable=self._reuse_resources_var,
+            bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
+            activebackground=C['base'], activeforeground=C['text']).pack(side=tk.RIGHT, padx=8)
         tk.Button(row3, text='低延迟停顿：0.6 秒', command=lambda: self._vad_silence_var.set(.6),
                   bg=C['surface1'], fg=C['text'], relief=tk.FLAT).pack(side=tk.RIGHT)
 

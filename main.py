@@ -116,7 +116,8 @@ class InterviewAssistant:
 
     def _new_transcriber(self, language, device):
         return Transcriber(language=language, device=device,
-                           on_metrics=self._gui.update_asr_metrics, on_error=self._gui.set_status)
+                           on_metrics=self._gui.update_asr_metrics, on_error=self._gui.set_status,
+                           reuse_resources=self._gui._reuse_resources_var.get())
 
     def _load_model_bg(self, transcriber=None) -> None:
         """Load FunASR Paraformer in a background thread."""
