@@ -21,13 +21,14 @@ On macOS:  Install BlackHole (https://github.com/ExistentialAudio/BlackHole)
 import sounddevice as sd
 import numpy as np
 import queue
+import threading
 from typing import Optional, Callable, List, Dict
 
 
 class AudioCapture:
     """Manages audio device listing and real-time capture."""
 
-    SAMPLE_RATE = 16000   # Whisper expects 16 kHz
+    SAMPLE_RATE = 16000
     CHUNK_MS = 100        # 100 ms per callback chunk
 
     def __init__(self):
@@ -35,7 +36,13 @@ class AudioCapture:
         self._stream: Optional[sd.InputStream] = None
         self.is_capturing = False
         # Raw audio queue for consumers that want to pull data themselves
-        self.audio_queue: queue.Queue = queue.Queue()
+        self.audio_queue: queue.Queue = queue.Queue(maxsize=20)
+        self._worker = None
+        self._stop_event = threading.Event()
+        self.dropped_chunks = 0
+        self.input_overflows = 0
+        self.on_discontinuity = lambda: None
+        self.on_error = lambda _: None
 
     # ------------------------------------------------------------------
     # Device helpers
@@ -110,36 +117,82 @@ class AudioCapture:
         if self.is_capturing:
             return
 
-        self.is_capturing = True
+        self.dropped_chunks = 0
+        self.input_overflows = 0
+        self._stop_event = threading.Event()
+        stop_event = self._stop_event
 
         def _sd_callback(indata, frames, time_info, status):
-            if not self.is_capturing:
+            if not self.is_capturing or stop_event.is_set():
                 return
-            mono = indata[:, 0].copy().astype(np.float32)
-            self.audio_queue.put(mono)
-            if callback:
-                callback(mono)
+            if status and getattr(status, 'input_overflow', False):
+                self.input_overflows += 1
+            mono = indata[:, 0].astype(np.float32, copy=True)
+            try:
+                self.audio_queue.put_nowait(mono)
+            except queue.Full:
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                self.dropped_chunks += 1
+                try:
+                    self.audio_queue.put_nowait(mono)
+                except queue.Full:
+                    self.dropped_chunks += 1
 
-        self._stream = sd.InputStream(
-            device=device_id,
-            channels=1,
-            samplerate=self.SAMPLE_RATE,
-            blocksize=self._chunk_frames,
-            dtype="float32",
-            callback=_sd_callback,
-        )
-        self._stream.start()
+        def dispatch():
+            last_dropped = 0
+            last_overflows = 0
+            while not stop_event.is_set():
+                try:
+                    mono = self.audio_queue.get(timeout=.1)
+                except queue.Empty:
+                    continue
+                if stop_event.is_set():
+                    break
+                try:
+                    if self.dropped_chunks > last_dropped or self.input_overflows > last_overflows:
+                        last_dropped = self.dropped_chunks
+                        last_overflows = self.input_overflows
+                        self.on_discontinuity()
+                        self.on_error('音频输入中断或积压，本句已丢弃，请检查输入设备和推理速度')
+                    if callback:
+                        callback(mono)
+                except Exception:
+                    self.on_error('音频处理失败，请停止并重新开始监听')
+
+        try:
+            self._stream = sd.InputStream(
+                device=device_id, channels=1, samplerate=self.SAMPLE_RATE,
+                blocksize=self._chunk_frames, dtype='float32', callback=_sd_callback,
+            )
+            self.is_capturing = True
+            self._worker = threading.Thread(target=dispatch, name='audio-worker', daemon=True)
+            self._worker.start()
+            self._stream.start()
+        except Exception:
+            self.stop()
+            raise
 
     def stop(self) -> None:
         """Stop capturing and release the audio stream."""
         self.is_capturing = False
+        self._stop_event.set()
         if self._stream is not None:
             try:
                 self._stream.stop()
-                self._stream.close()
             except Exception:
-                pass
+                self.on_error('音频设备停止失败，正在尝试释放设备')
+            finally:
+                try:
+                    self._stream.close()
+                except Exception:
+                    self.on_error('音频设备释放失败，请检查设备连接')
             self._stream = None
+        if self._worker and threading.current_thread() is not self._worker:
+            self._worker.join(timeout=.25)
+        self._worker = None
         # Drain the queue
         while not self.audio_queue.empty():
             try:

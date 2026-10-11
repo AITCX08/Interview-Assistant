@@ -31,6 +31,16 @@ models/
 *.m4a
 *.mp4
 
+# Private documents and extracted resume/context data
+*.pdf
+*.docx
+*.doc
+resumes/
+uploads/
+private-input/
+credentials*.json
+context*.json
+
 # Editors / OS
 .idea/
 .vscode/
