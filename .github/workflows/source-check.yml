@@ -1,0 +1,42 @@
+name: Source checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Python syntax (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Parse tracked Python source without importing application modules
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          import pathlib
+          import subprocess
+
+          names = subprocess.check_output(['git', 'ls-files', '-z', '*.py']).decode().split('\0')
+          count = 0
+          for name in filter(None, names):
+              ast.parse(pathlib.Path(name).read_text(encoding='utf-8-sig'), filename=name)
+              count += 1
+          if not count:
+              raise SystemExit('No Python source found')
+          print(f'Parsed {count} Python source files')
+          PY

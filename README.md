@@ -48,7 +48,7 @@
 ### Linux / macOS
 
 ```bash
-git clone https://github.com/CJWang-bilibili/Interview-Assistant.git
+git clone https://github.com/AITCX08/Interview-Assistant.git
 cd Interview-Assistant
 bash setup.sh
 ```
@@ -56,7 +56,7 @@ bash setup.sh
 ### Windows
 
 ```bat
-git clone https://github.com/CJWang-bilibili/Interview-Assistant.git
+git clone https://github.com/AITCX08/Interview-Assistant.git
 cd Interview-Assistant
 setup_windows.bat
 ```
@@ -70,7 +70,7 @@ python3 main.py       # Linux / macOS
 python  main.py       # Windows
 ```
 
-> **首次启动**会自动下载 Whisper `base` 模型（约 150 MB），之后离线运行。
+> **首次启动**会下载 FunASR 对应的识别模型及可选 VAD、标点模型；下载体积取决于模型组合。模型缓存后可在本地推理，首次加载需要联网。
 
 ---
 
@@ -122,7 +122,7 @@ https://vb-audio.com/Cable/
 Interview-Assistant/
 ├── main.py             # 入口，组装各模块
 ├── audio_capture.py    # 系统音频捕获（sounddevice）
-├── transcriber.py      # 实时语音识别（faster-whisper）
+├── transcriber.py      # 实时语音识别（FunASR Paraformer / SenseVoice）
 ├── gui.py              # 浮窗 UI（tkinter）
 ├── requirements.txt    # Python 依赖
 ├── setup.sh            # Linux/macOS 安装脚本
@@ -147,13 +147,43 @@ Interview-Assistant/
 ## 常见问题
 
 **Q: 识别延迟多久？**
-A: 说话停顿 1~2 秒后触发，CPU 上 Paraformer 约 0.5~2 秒出结果，比 Whisper 快。
+A: 默认在约 1.2 秒静音后提交语音段；可以在界面调整阈值和静音时长。推理耗时取决于模型、设备和音频长度，尚未提供标准性能基准。
 
 **Q: 支持英文吗？**
 A: 支持。在语言下拉框选 `en` 自动切换为 `paraformer-en`，选 `auto` 使用 SenseVoice 多语言模型。
 
 **Q: 首次下载慢怎么办？**
-A: 模型从 ModelScope（阿里云）下载，国内速度较快。下载后完全离线运行。
+A: 首次加载通过模型库下载并缓存。请检查网络与模型缓存；是否能完全离线加载，需要在具体依赖版本和模型组合上验证。
 
-**Q: 相比 Whisper 提升多少？**
-A: 中文字错率 Paraformer 约 3~5%，Whisper base 约 15~20%，提升显著。
+**Q: 识别效果有基准测试吗？**
+A: 当前项目没有发布统一测试集上的字错率或模型对比结果，效果需要结合实际音频验证。
+
+## 开发与仓库状态
+
+维护仓库：[AITCX08/Interview-Assistant](https://github.com/AITCX08/Interview-Assistant)。当前为开发阶段，尚未发布稳定版本。
+
+建议使用 Python 3.10 或 3.12，并优先使用独立虚拟环境安装依赖：
+
+```powershell
+# Windows PowerShell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+```
+
+```bash
+# Linux / macOS（需具备 tkinter 和 PortAudio 系统依赖）
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python main.py
+```
+
+现有一键安装脚本会安装依赖，并可能调用系统包管理器；请先阅读脚本。上述虚拟环境方式便于隔离 Python 依赖。CUDA 版本需要结合显卡、驱动和 PyTorch 官方安装说明选择，CPU 环境也可以使用。
+
+CI 仅进行跨 Windows / Linux 的 Python 源码语法检查；GUI、音频采集、模型下载和 GPU 推理仍需单独验证。贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全报告方式见 [SECURITY.md](SECURITY.md)。
+
+## 隐私与许可证
+
+音频采集应在参与者同意且符合会议或面试规则的场景下使用。识别文本会显示在窗口中；点击复制按钮会写入系统剪贴板。请勿将真实录音、会议文本或凭据提交到仓库。
+
+当前仓库尚未声明开源许可证；代码公开与许可证授权是不同事项。正式接受外部贡献和复用前，需要明确现有代码的授权归属并补充许可证。
