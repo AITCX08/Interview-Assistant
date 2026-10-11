@@ -36,6 +36,8 @@ from typing import Callable, Dict, List, Optional
 from ai_client import DeepSeekSettings, MODELS
 from credentials import KeyStore, CredentialError
 from resume_context import extract_resume, ResumeError
+from extension_api import CORE_API_VERSION, ExtensionContext
+from local_data import export_text, LocalDataError
 
 
 def _default_compute_device() -> str:
@@ -102,6 +104,10 @@ class InterviewAssistantGUI:
         self.on_segment_discarded = None
         self._active_ai_request = None
         self._closing = False
+        self._extensions = []
+        self._extensions_closed = False
+        self._poll_timer = None
+        self.root.bind('<Destroy>', self._on_root_destroy, add='+')
 
         # Internal state
         self._is_listening = False
@@ -282,6 +288,8 @@ class InterviewAssistantGUI:
             command=self._copy_to_history,
         )
         self._copy_btn.pack(side=tk.RIGHT)
+        tk.Button(btn_row, text='导出当前文字', bg=C['surface1'], fg=C['text'],
+                  relief=tk.FLAT, command=lambda: self._export_text(self.get_current_text())).pack(side=tk.RIGHT, padx=8)
 
         # ── History ───────────────────────────────────────────────────
         hf = tk.LabelFrame(
@@ -306,6 +314,8 @@ class InterviewAssistantGUI:
             cursor="hand2",
             command=self._clear_history,
         ).pack(side=tk.RIGHT)
+        tk.Button(hist_top, text='导出历史', bg=C['surface1'], fg=C['text'], relief=tk.FLAT,
+                  command=lambda: self._export_text(self._history_box.get('1.0', tk.END))).pack(side=tk.RIGHT, padx=8)
 
         self._history_box = scrolledtext.ScrolledText(
             hf, height=7, wrap=tk.WORD,
@@ -463,6 +473,63 @@ class InterviewAssistantGUI:
 
     def get_current_text(self):
         return self._current_box.get('1.0', tk.END).strip()
+
+    def _export_text(self, text):
+        try:
+            if export_text(self.root, text):
+                self.set_status('已导出所选文字到本机')
+        except LocalDataError as exc:
+            self.set_status(str(exc))
+
+    def mount_extension(self, title, factory):
+        if self._extensions_closed:
+            raise RuntimeError('扩展已关闭')
+        parent = tk.Frame(self._notebook, bg=C['base'])
+        context = ExtensionContext(CORE_API_VERSION, self.get_ai_settings,
+            lambda: self._resume_box.get('1.0', tk.END).strip(), self.get_current_text, self.post_to_ui)
+        try:
+            extension = factory(parent, context)
+        except Exception:
+            parent.destroy()
+            raise
+        self._notebook.add(parent, text=title)
+        self._extensions.append(extension)
+        return extension
+
+    def post_to_ui(self, callback):
+        if not self._closing and not self._extensions_closed:
+            self._update_q.put(('extension', callback))
+
+    def close_extensions(self):
+        if self._extensions_closed:
+            return
+        self._extensions_closed = True
+        for extension in self._extensions:
+            if callable(getattr(extension, 'close', None)):
+                try:
+                    extension.close()
+                except Exception:
+                    self.set_status('扩展关闭失败')
+        self._extensions.clear()
+
+    def _cancel_poll(self):
+        if self._poll_timer is not None:
+            try:
+                self.root.after_cancel(self._poll_timer)
+            except tk.TclError:
+                pass
+            self._poll_timer = None
+
+    def _on_root_destroy(self, event):
+        if event.widget is self.root:
+            self._closing = True
+            self._cancel_poll()
+
+    def shutdown(self):
+        self._closing = True
+        self._cancel_poll()
+        self.close_extensions()
+        self._api_key_var.set('')
 
     def _on_apply_ai(self):
         if self.on_apply_ai:
@@ -669,6 +736,7 @@ class InterviewAssistantGUI:
     # ------------------------------------------------------------------
 
     def _poll_updates(self) -> None:
+        self._cancel_poll()
         if self._closing:
             return
         for _ in range(100):
@@ -681,10 +749,13 @@ class InterviewAssistantGUI:
                 return
             except Exception:
                 self._status_lbl.configure(text='界面事件处理失败，请检查配置')
-        self.root.after(40, self._poll_updates)
+        self._poll_timer = self.root.after(40, self._poll_updates)
 
     def _apply(self, action: str, value) -> None:
-        if action == 'resume':
+        if action == 'extension':
+            if not self._closing and not self._extensions_closed:
+                value()
+        elif action == 'resume':
             generation, document, error = value
             self._resume_busy = False
             self._resume_import_btn.configure(state=tk.NORMAL)
