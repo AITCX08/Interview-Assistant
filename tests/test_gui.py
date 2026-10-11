@@ -137,3 +137,18 @@ class GUITests(unittest.TestCase):
         self.gui._apply('resume', (self.gui._resume_generation-1, ResumeDocument('stale'), None))
         self.assertEqual(self.gui._resume_box.get('1.0', 'end').strip(), '')
         self.assertFalse(self.gui._use_resume_var.get())
+
+    def test_encrypted_key_recalled_masked(self):
+        from unittest.mock import Mock
+        store=Mock()
+        store.load.return_value='synthetic-stored-key'
+        with patch('gui._default_compute_device', return_value='cpu'):
+            gui=InterviewAssistantGUI(key_store=store)
+        try:
+            gui.root.withdraw()
+            self.assertEqual(gui._api_key_var.get(), 'synthetic-stored-key')
+            self.assertEqual(gui._api_key_entry.cget('show'), '*')
+            self.assertTrue(gui._remember_key_var.get())
+        finally:
+            gui._closing=True
+            gui.root.destroy()

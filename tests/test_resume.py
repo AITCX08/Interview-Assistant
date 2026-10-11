@@ -1,3 +1,4 @@
+import os
 import io
 import json
 import tempfile
@@ -27,6 +28,7 @@ class ResumeTests(unittest.TestCase):
             p.write_bytes(b'bad')
             with self.assertRaises(ResumeError): extract_resume(p)
 
+    @unittest.skipUnless(os.name == 'nt', 'DPAPI requires Windows')
     def test_key_roundtrip_and_ciphertext(self):
         with tempfile.TemporaryDirectory() as folder:
             store = KeyStore(Path(folder)/'key.dpapi')
@@ -47,3 +49,17 @@ class ResumeTests(unittest.TestCase):
         self.assertIn('Synthetic Python project', captured[0]['messages'][1]['content'])
         self.assertEqual(captured[0]['messages'][-1]['content'], 'question')
         self.assertNotIn('Synthetic Python project', repr(settings))
+
+    def test_blank_and_encrypted_pdf_rejected(self):
+        from pypdf import PdfWriter
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'synthetic.pdf'
+            writer=PdfWriter()
+            writer.add_blank_page(width=100,height=100)
+            writer.write(path)
+            with self.assertRaisesRegex(ResumeError, 'OCR'):
+                extract_resume(path)
+            writer.encrypt('synthetic-password')
+            writer.write(path)
+            with self.assertRaisesRegex(ResumeError, '密码'):
+                extract_resume(path)
