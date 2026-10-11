@@ -119,7 +119,7 @@ class AudioCapture:
         stop_event = self._stop_event
 
         def _sd_callback(indata, frames, time_info, status):
-            if not self.is_capturing:
+            if not self.is_capturing or stop_event.is_set():
                 return
             mono = indata[:, 0].astype(np.float32, copy=True)
             try:
@@ -173,9 +173,13 @@ class AudioCapture:
         if self._stream is not None:
             try:
                 self._stream.stop()
-                self._stream.close()
             except Exception:
-                pass
+                self.on_error('音频设备停止失败，正在尝试释放设备')
+            finally:
+                try:
+                    self._stream.close()
+                except Exception:
+                    self.on_error('音频设备释放失败，请检查设备连接')
             self._stream = None
         if self._worker and threading.current_thread() is not self._worker:
             self._worker.join(timeout=.25)

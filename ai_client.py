@@ -178,7 +178,7 @@ class AnswerService:
                 raise AIError('AI 服务已关闭')
             self._cancel.set()
             self._request_id += 1
-            self._pending = (self._request_id, settings, prompt)
+            self._pending = (self._request_id, settings, prompt, time.perf_counter())
             self._condition.notify()
             return self._request_id
 
@@ -193,13 +193,18 @@ class AnswerService:
                 self._condition.wait_for(lambda: self._closed or self._pending is not None)
                 if self._closed:
                     return
-                request_id, settings, prompt = self._pending
+                request_id, settings, prompt, submitted_at = self._pending
                 self._pending = None
                 self._cancel = cancel = threading.Event()
             try:
                 self._emit(request_id, 'started')
+                queue_ms = (time.perf_counter() - submitted_at) * 1000
                 metrics = self.client.stream(settings, prompt, cancel,
-                                             lambda text: self._emit(request_id, 'delta', text=text))
+                    lambda text: self._emit(request_id, 'delta', text=text,
+                                           elapsed_ms=(time.perf_counter() - submitted_at) * 1000))
+                metrics = dict(metrics, queue_ms=queue_ms,
+                               first_token_ms=metrics['first_token_ms'] + queue_ms,
+                               total_ms=metrics['total_ms'] + queue_ms)
                 self._emit(request_id, 'done', metrics=metrics)
             except AIError as exc:
                 self._emit(request_id, 'error', text=str(exc))

@@ -32,6 +32,18 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import scrolledtext, ttk
 from typing import Callable, Dict, List, Optional
+from ai_client import DeepSeekSettings, MODELS
+
+
+def _default_compute_device() -> str:
+    """'cuda' if a GPU is available, else 'cpu' — used as the dropdown default."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +78,8 @@ class InterviewAssistantGUI:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Interview Assistant · 面试助手")
-        self.root.geometry("660x920")
-        self.root.minsize(500, 700)
+        self.root.geometry("820x920")
+        self.root.minsize(760, 720)
         self.root.configure(bg=C["base"])
         self.root.attributes("-topmost", True)
 
@@ -75,6 +87,13 @@ class InterviewAssistantGUI:
         self.on_start:        Optional[Callable[[], None]] = None
         self.on_stop:         Optional[Callable[[], None]] = None
         self.on_reload_model: Optional[Callable[[], None]] = None
+        self.on_run_ai = None
+        self.on_cancel_ai = None
+        self.on_apply_ai = None
+        self.on_simulate_ai = None
+        self.on_transcript_received = None
+        self._active_ai_request = None
+        self._closing = False
 
         # Internal state
         self._is_listening = False
@@ -104,6 +123,10 @@ class InterviewAssistantGUI:
                 lightcolor=C["surface0"],
             )
         style.map("TCombobox", fieldbackground=[("readonly", C["surface0"])])
+        style.configure('TNotebook', background=C['base'], bordercolor=C['surface1'])
+        style.configure('TNotebook.Tab', background=C['surface1'], foreground=C['text'], padding=(10, 5))
+        style.map('TNotebook.Tab', background=[('selected', C['surface0'])],
+                  foreground=[('selected', C['blue'])])
 
     # ------------------------------------------------------------------
     # UI construction
@@ -197,10 +220,22 @@ class InterviewAssistantGUI:
 
         # ── Model & hardware settings ─────────────────────────────────
         self._build_model_panel()
+        self._asr_metrics_var = tk.StringVar(value='识别：排队 — / 推理 —')
+        self._ai_metrics_var = tk.StringVar(value='AI：首字 — / 完成 —')
+        metrics_row = tk.Frame(self.root, bg=C['base'])
+        metrics_row.pack(fill=tk.X, padx=14, pady=(0, 6))
+        for var in (self._asr_metrics_var, self._ai_metrics_var):
+            tk.Label(metrics_row, textvariable=var, bg=C['base'], fg=C['subtext']).pack(side=tk.LEFT, padx=(0, 20))
+        self._notebook = ttk.Notebook(self.root)
+        self._notebook.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
+        transcript_tab = tk.Frame(self._notebook, bg=C['base'])
+        self._ai_tab = tk.Frame(self._notebook, bg=C['base'])
+        self._notebook.add(transcript_tab, text='语音转写')
+        self._notebook.add(self._ai_tab, text='DeepSeek 建议与配置')
 
         # ── Current transcription ─────────────────────────────────────
         cf = tk.LabelFrame(
-            self.root, text="  实时识别  ",
+            transcript_tab, text="  实时识别  ",
             bg=C["base"], fg=C["blue"],
             font=("Helvetica", 10, "bold"),
             bd=1, relief=tk.GROOVE,
@@ -242,7 +277,7 @@ class InterviewAssistantGUI:
 
         # ── History ───────────────────────────────────────────────────
         hf = tk.LabelFrame(
-            self.root, text="  历史对话  ",
+            transcript_tab, text="  历史对话  ",
             bg=C["base"], fg=C["blue"],
             font=("Helvetica", 10, "bold"),
             bd=1, relief=tk.GROOVE,
@@ -284,6 +319,90 @@ class InterviewAssistantGUI:
         self._history_box.tag_configure(
             "sep", foreground=C["surface1"], font=("Helvetica", 7)
         )
+        self._build_ai_panel()
+
+    def _build_ai_panel(self):
+        settings = tk.LabelFrame(self._ai_tab, text=' DeepSeek 配置 ', bg=C['base'], fg=C['blue'])
+        settings.pack(fill=tk.X, padx=10, pady=10)
+        settings.columnconfigure(1, weight=1)
+        self._api_key_var = tk.StringVar()
+        self._ai_model_var = tk.StringVar(value=MODELS[0])
+        self._ai_tokens_var = tk.StringVar(value='512')
+        self._auto_ai_var = tk.BooleanVar(value=False)
+        self._show_key_var = tk.BooleanVar(value=False)
+        tk.Label(settings, text='API Key', bg=C['base'], fg=C['text']).grid(row=0, column=0, padx=8, pady=8)
+        self._api_key_entry = tk.Entry(settings, textvariable=self._api_key_var, show='*',
+            bg=C['surface0'], fg=C['text'], insertbackground=C['text'],
+            selectbackground=C['blue'], selectforeground=C['base'], relief=tk.FLAT,
+            highlightthickness=1, highlightbackground=C['surface1'], highlightcolor=C['blue'])
+        self._api_key_entry.grid(row=0, column=1, sticky='ew', padx=8, pady=8)
+        tk.Checkbutton(settings, text='显示', variable=self._show_key_var,
+            command=lambda: self._api_key_entry.configure(show='' if self._show_key_var.get() else '*'),
+            bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
+            activebackground=C['base'], activeforeground=C['text']).grid(row=0, column=2, padx=8)
+        tk.Label(settings, text='模型', bg=C['base'], fg=C['text']).grid(row=1, column=0, padx=8, pady=6)
+        ttk.Combobox(settings, textvariable=self._ai_model_var, values=MODELS, state='readonly').grid(row=1, column=1, sticky='ew', padx=8)
+        tk.Label(settings, text='仅本次运行保存 Key', bg=C['base'], fg=C['subtext']).grid(row=1, column=2, padx=8)
+        tk.Label(settings, text='回答上限', bg=C['base'], fg=C['text']).grid(row=2, column=0, padx=8, pady=6)
+        tk.Spinbox(settings, from_=64, to=2048, increment=64, textvariable=self._ai_tokens_var,
+            bg=C['surface0'], fg=C['text'], buttonbackground=C['surface1'],
+            insertbackground=C['text'], highlightbackground=C['surface1'], highlightcolor=C['blue'],
+            width=10).grid(row=2, column=1, sticky='w', padx=8)
+        tk.Button(settings, text='应用配置', command=self._on_apply_ai,
+            bg=C['blue'], fg=C['base'], relief=tk.FLAT).grid(row=2, column=2, padx=8, pady=6)
+        tk.Checkbutton(settings, text='识别完成后自动生成建议（上传当前语音段文字到 DeepSeek）',
+            variable=self._auto_ai_var, bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
+            activebackground=C['base'], activeforeground=C['text']).grid(row=3, column=0, columnspan=3, sticky='w', padx=8, pady=8)
+        tk.Label(settings, text='默认非思考模式、流式输出。自动模式仅发送新语音段；手动模式发送当前转写区文字。',
+            bg=C['base'], fg=C['subtext'], wraplength=660, justify=tk.LEFT).grid(row=4, column=0, columnspan=3, sticky='w', padx=8, pady=(0, 8))
+        buttons = tk.Frame(self._ai_tab, bg=C['base'])
+        buttons.pack(fill=tk.X, padx=10)
+        for text, callback, color in (
+            ('生成建议', lambda: self.on_run_ai and self.on_run_ai(), 'green'),
+            ('取消回答', lambda: self.on_cancel_ai and self.on_cancel_ai(), 'red'),
+            ('本地模拟（不联网）', lambda: self.on_simulate_ai and self.on_simulate_ai(), 'mauve'),
+        ):
+            tk.Button(buttons, text=text, command=callback, bg=C[color], fg=C['base'],
+                      relief=tk.FLAT, padx=12, pady=6).pack(side=tk.LEFT, padx=(0, 10))
+        self._ai_status_lbl = tk.Label(self._ai_tab, text='尚未发起 AI 请求', bg=C['base'], fg=C['subtext'],
+                                       wraplength=680, justify=tk.LEFT)
+        self._ai_status_lbl.pack(fill=tk.X, padx=10, pady=8)
+        self._answer_box = scrolledtext.ScrolledText(self._ai_tab, height=10, wrap=tk.WORD,
+            bg=C['surface0'], fg=C['text'], insertbackground=C['text'],
+            selectbackground=C['blue'], selectforeground=C['base'],
+            font=('Helvetica', 12), relief=tk.FLAT, padx=10, pady=10, state=tk.DISABLED)
+        self._answer_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+    def get_ai_settings(self, simulation=False):
+        return DeepSeekSettings(api_key=self._api_key_var.get().strip(),
+                                model=self._ai_model_var.get(), max_tokens=int(self._ai_tokens_var.get()),
+                                simulation=simulation)
+
+    def get_current_text(self):
+        return self._current_box.get('1.0', tk.END).strip()
+
+    def _on_apply_ai(self):
+        if self.on_apply_ai:
+            self.on_apply_ai()
+
+    def begin_ai_request(self, request_id, simulation=False):
+        self._active_ai_request = request_id
+        self._answer_box.configure(state=tk.NORMAL)
+        self._answer_box.delete('1.0', tk.END)
+        self._answer_box.configure(state=tk.DISABLED)
+        self._ai_metrics_var.set('AI：首字 — / 完成 —')
+        self._ai_status_lbl.configure(text='本地模拟中，不联网' if simulation else '等待 DeepSeek 流式回答…')
+        self._notebook.select(self._ai_tab)
+
+    def invalidate_ai_request(self, message='回答已取消'):
+        self._active_ai_request = None
+        self._ai_status_lbl.configure(text=message)
+
+    def update_ai_event(self, event):
+        self._update_q.put(('ai', event))
+
+    def update_asr_metrics(self, metrics):
+        self._update_q.put(('asr_metrics', metrics))
 
     def _build_model_panel(self) -> None:
         mf = tk.LabelFrame(
@@ -299,7 +418,7 @@ class InterviewAssistantGUI:
 
         tk.Label(row1, text="计算设备:", bg=C["base"], fg=C["text"],
                  font=("Helvetica", 10)).pack(side=tk.LEFT)
-        self._compute_device_var = tk.StringVar(value="cpu")
+        self._compute_device_var = tk.StringVar(value=_default_compute_device())
         ttk.Combobox(
             row1, textvariable=self._compute_device_var,
             values=["cpu", "cuda"],
@@ -351,6 +470,8 @@ class InterviewAssistantGUI:
             font=("Helvetica", 9),
         )
         self._hw_info_lbl.pack(side=tk.LEFT)
+        tk.Button(row3, text='低延迟停顿：0.6 秒', command=lambda: self._vad_silence_var.set(.6),
+                  bg=C['surface1'], fg=C['text'], relief=tk.FLAT).pack(side=tk.RIGHT)
 
     # ------------------------------------------------------------------
     # Public API (called from background threads via the update queue)
@@ -370,9 +491,9 @@ class InterviewAssistantGUI:
         """rms: 0.0 – 1.0 raw RMS; will be scaled for display."""
         self._update_q.put(("volume", min(100.0, rms * 600)))
 
-    def append_transcription(self, text: str) -> None:
+    def append_transcription(self, text: str, generation=None) -> None:
         """Append a new recognised segment to the current text box."""
-        self._update_q.put(("append", text))
+        self._update_q.put(("append", (text, generation)))
 
     def get_selected_device_id(self) -> Optional[int]:
         return self._device_map.get(self._device_var.get())
@@ -447,13 +568,19 @@ class InterviewAssistantGUI:
     # ------------------------------------------------------------------
 
     def _poll_updates(self) -> None:
-        try:
-            while True:
+        if self._closing:
+            return
+        for _ in range(100):
+            try:
                 action, value = self._update_q.get_nowait()
                 self._apply(action, value)
-        except Exception:
-            pass
-        self.root.after(40, self._poll_updates)  # ~25 fps
+            except queue.Empty:
+                break
+            except tk.TclError:
+                return
+            except Exception:
+                self._status_lbl.configure(text='界面事件处理失败，请检查配置')
+        self.root.after(40, self._poll_updates)
 
     def _apply(self, action: str, value) -> None:
         if action == "devices":
@@ -500,8 +627,34 @@ class InterviewAssistantGUI:
                 self._status_lbl.configure(text="已停止", fg=C["yellow"])
 
         elif action == "append":
-            self._current_box.insert(tk.END, value + "\n")
+            text, generation = value if isinstance(value, tuple) else (value, None)
+            if self.on_transcript_received and not self.on_transcript_received(text, generation):
+                return
+            self._current_box.insert(tk.END, text + "\n")
             self._current_box.see(tk.END)
+
+        elif action == 'asr_metrics':
+            self._asr_metrics_var.set(f"识别：排队 {value['queue_ms']:.0f} ms / 推理 {value['inference_ms']:.0f} ms")
+
+        elif action == 'ai':
+            if value['request_id'] != self._active_ai_request:
+                return
+            if value['kind'] == 'delta':
+                if not self._answer_box.get('1.0', tk.END).strip() and 'elapsed_ms' in value:
+                    self._ai_metrics_var.set(f"AI：首字 {value['elapsed_ms']:.0f} ms / 接收中")
+                self._answer_box.configure(state=tk.NORMAL)
+                self._answer_box.insert(tk.END, value['text'])
+                self._answer_box.see(tk.END)
+                self._answer_box.configure(state=tk.DISABLED)
+                self._ai_status_lbl.configure(text='正在接收回答…')
+            elif value['kind'] == 'done':
+                metrics = value['metrics']
+                self._ai_metrics_var.set(f"AI：首字 {metrics['first_token_ms']:.0f} ms / 完成 {metrics['total_ms']:.0f} ms")
+                self._ai_status_lbl.configure(text='已到输出上限，回答可能不完整' if metrics.get('truncated') else '回答完成')
+            elif value['kind'] == 'started':
+                self._ai_status_lbl.configure(text='请求已开始，等待首字…')
+            elif value['kind'] == 'error':
+                self._ai_status_lbl.configure(text=value['text'])
 
         elif action == "hw_info":
             self._hw_info_lbl.configure(text=value)
