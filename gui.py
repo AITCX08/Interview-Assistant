@@ -106,6 +106,8 @@ class InterviewAssistantGUI:
         self._closing = False
         self._extensions = []
         self._extensions_closed = False
+        self._poll_timer = None
+        self.root.bind('<Destroy>', self._on_root_destroy, add='+')
 
         # Internal state
         self._is_listening = False
@@ -510,6 +512,25 @@ class InterviewAssistantGUI:
                     self.set_status('扩展关闭失败')
         self._extensions.clear()
 
+    def _cancel_poll(self):
+        if self._poll_timer is not None:
+            try:
+                self.root.after_cancel(self._poll_timer)
+            except tk.TclError:
+                pass
+            self._poll_timer = None
+
+    def _on_root_destroy(self, event):
+        if event.widget is self.root:
+            self._closing = True
+            self._cancel_poll()
+
+    def shutdown(self):
+        self._closing = True
+        self._cancel_poll()
+        self.close_extensions()
+        self._api_key_var.set('')
+
     def _on_apply_ai(self):
         if self.on_apply_ai:
             self.on_apply_ai()
@@ -715,6 +736,7 @@ class InterviewAssistantGUI:
     # ------------------------------------------------------------------
 
     def _poll_updates(self) -> None:
+        self._cancel_poll()
         if self._closing:
             return
         for _ in range(100):
@@ -727,7 +749,7 @@ class InterviewAssistantGUI:
                 return
             except Exception:
                 self._status_lbl.configure(text='界面事件处理失败，请检查配置')
-        self.root.after(40, self._poll_updates)
+        self._poll_timer = self.root.after(40, self._poll_updates)
 
     def _apply(self, action: str, value) -> None:
         if action == 'extension':

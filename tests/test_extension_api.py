@@ -13,6 +13,7 @@ class ExtensionTests(unittest.TestCase):
             self.gui = InterviewAssistantGUI(key_store=Mock(load=Mock(return_value='')))
         self.gui.root.withdraw()
         self.addCleanup(self.gui.root.destroy)
+        self.addCleanup(lambda: getattr(self.gui, 'shutdown', lambda: None)())
 
     def test_explicit_mount_and_queued_ui_callback(self):
         calls = []
@@ -45,3 +46,15 @@ class ExtensionTests(unittest.TestCase):
         self.assertFalse(self.gui._use_resume_var.get())
         self.assertEqual(contexts[0].get_resume_text(), 'synthetic resume')
         self.assertEqual(contexts[0].get_settings(False).resume_context, '')
+
+    def test_shutdown_cancels_single_owned_ui_timer(self):
+        extension = Mock()
+        self.gui.mount_extension('synthetic', lambda parent, context: extension)
+        first_timer = self.gui._poll_timer
+        self.gui._poll_updates()
+        self.assertNotIn(first_timer, self.gui.root.tk.call('after', 'info'))
+        current_timer = self.gui._poll_timer
+        self.gui.shutdown()
+        self.assertNotIn(current_timer, self.gui.root.tk.call('after', 'info'))
+        self.assertIsNone(self.gui._poll_timer)
+        extension.close.assert_called_once()

@@ -293,9 +293,7 @@ class InterviewAssistant:
         self._stop_listening()
         self._transcriber.close()
         self._ai.close()
-        self._gui.close_extensions()
-        self._gui._api_key_var.set('')
-        self._gui._closing = True
+        self._gui.shutdown()
         self._gui.root.destroy()
 
     # ------------------------------------------------------------------
