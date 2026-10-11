@@ -17,6 +17,7 @@ from audio_capture import AudioCapture
 from transcriber import Transcriber, _detect_device
 from gui import InterviewAssistantGUI
 from ai_client import AIError, AnswerService, RoutingClient
+from credentials import CredentialError
 
 
 def _get_hw_info() -> str:
@@ -215,9 +216,11 @@ class InterviewAssistant:
         try:
             self._gui.get_ai_settings().validate()
             self._cancel_ai()
-            self._gui.invalidate_ai_request('配置已应用，Key 仅保留在本次运行内存中')
-        except (AIError, ValueError) as exc:
-            message = str(exc) if isinstance(exc, AIError) else '回答上限须为整数'
+            if self._gui._remember_key_var.get():
+                self._gui._key_store.save(self._gui._api_key_var.get())
+            self._gui.invalidate_ai_request('配置已应用；Key 已本机加密保存' if self._gui._remember_key_var.get() else '配置已应用；本次填写仅保留内存，已有加密 Key 不受影响')
+        except (AIError, CredentialError, ValueError) as exc:
+            message = str(exc) if isinstance(exc, (AIError, CredentialError)) else '回答上限须为整数'
             self._gui.invalidate_ai_request(message)
 
     def _start_ai(self, prompt, simulation=False):
@@ -225,8 +228,8 @@ class InterviewAssistant:
             settings = self._gui.get_ai_settings(simulation=simulation)
             request_id = self._ai.submit(settings, prompt)
             self._gui.begin_ai_request(request_id, simulation=simulation)
-        except (AIError, ValueError) as exc:
-            message = str(exc) if isinstance(exc, AIError) else '回答上限须为整数'
+        except (AIError, CredentialError, ValueError) as exc:
+            message = str(exc) if isinstance(exc, (AIError, CredentialError)) else '回答上限须为整数'
             self._gui.invalidate_ai_request(message)
 
     def _simulate_ai(self):

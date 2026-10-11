@@ -14,6 +14,10 @@ from ai_client import DeepSeekClient
 @unittest.skipIf(os.name != 'nt' and not os.environ.get('DISPLAY'), 'GUI requires a display')
 class GUITests(unittest.TestCase):
     def setUp(self):
+        self.store_patch = patch('gui.KeyStore')
+        store = self.store_patch.start()
+        store.return_value.load.return_value = ''
+        self.addCleanup(self.store_patch.stop)
         with patch('gui._default_compute_device', return_value='cpu'):
             self.gui = InterviewAssistantGUI()
         self.gui.root.withdraw()
@@ -122,3 +126,14 @@ class GUITests(unittest.TestCase):
         self.assertIn('模拟 AI 回答', app._gui._answer_box.get('1.0', 'end'))
         self.assertEqual(requests[0]['messages'][-1]['content'], '合成音频问题')
         self.assertEqual(len(requests), 1)
+
+    def test_resume_explicit_opt_in_and_stale_result(self):
+        from resume_context import ResumeDocument
+        self.gui._resume_box.insert('1.0', 'Synthetic Python experience')
+        self.assertEqual(self.gui.get_ai_settings(simulation=True).resume_context, '')
+        self.gui._use_resume_var.set(True)
+        self.assertIn('Python', self.gui.get_ai_settings(simulation=True).resume_context)
+        self.gui._clear_resume()
+        self.gui._apply('resume', (self.gui._resume_generation-1, ResumeDocument('stale'), None))
+        self.assertEqual(self.gui._resume_box.get('1.0', 'end').strip(), '')
+        self.assertFalse(self.gui._use_resume_var.get())

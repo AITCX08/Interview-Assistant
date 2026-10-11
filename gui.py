@@ -28,11 +28,14 @@ Layout
 from __future__ import annotations
 
 import queue
+import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import scrolledtext, ttk
+from tkinter import scrolledtext, ttk, filedialog
 from typing import Callable, Dict, List, Optional
 from ai_client import DeepSeekSettings, MODELS
+from credentials import KeyStore, CredentialError
+from resume_context import extract_resume, ResumeError
 
 
 def _default_compute_device() -> str:
@@ -75,7 +78,10 @@ _LANG_DISPLAY = {
 class InterviewAssistantGUI:
     """Main application window."""
 
-    def __init__(self) -> None:
+    def __init__(self, key_store=None) -> None:
+        self._key_store = key_store or KeyStore()
+        self._resume_generation = 0
+        self._resume_busy = False
         self.root = tk.Tk()
         self.root.title("Interview Assistant · 面试助手")
         self.root.geometry("820x920")
@@ -320,6 +326,13 @@ class InterviewAssistantGUI:
             "sep", foreground=C["surface1"], font=("Helvetica", 7)
         )
         self._build_ai_panel()
+        self._build_resume_panel()
+        try:
+            saved = self._key_store.load()
+            self._api_key_var.set(saved)
+            self._remember_key_var.set(bool(saved))
+        except CredentialError:
+            self._ai_status_lbl.configure(text='本机 Key 读取失败，请重新填写')
 
     def _build_ai_panel(self):
         settings = tk.LabelFrame(self._ai_tab, text=' DeepSeek 配置 ', bg=C['base'], fg=C['blue'])
@@ -342,7 +355,10 @@ class InterviewAssistantGUI:
             activebackground=C['base'], activeforeground=C['text']).grid(row=0, column=2, padx=8)
         tk.Label(settings, text='模型', bg=C['base'], fg=C['text']).grid(row=1, column=0, padx=8, pady=6)
         ttk.Combobox(settings, textvariable=self._ai_model_var, values=MODELS, state='readonly').grid(row=1, column=1, sticky='ew', padx=8)
-        tk.Label(settings, text='仅本次运行保存 Key', bg=C['base'], fg=C['subtext']).grid(row=1, column=2, padx=8)
+        self._remember_key_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(settings, text='本机加密记住 Key', variable=self._remember_key_var,
+            bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
+            activebackground=C['base'], activeforeground=C['text']).grid(row=1, column=2, padx=8)
         tk.Label(settings, text='回答上限', bg=C['base'], fg=C['text']).grid(row=2, column=0, padx=8, pady=6)
         tk.Spinbox(settings, from_=64, to=2048, increment=64, textvariable=self._ai_tokens_var,
             bg=C['surface0'], fg=C['text'], buttonbackground=C['surface1'],
@@ -373,10 +389,75 @@ class InterviewAssistantGUI:
             font=('Helvetica', 12), relief=tk.FLAT, padx=10, pady=10, state=tk.DISABLED)
         self._answer_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
+    def _build_resume_panel(self):
+        panel = tk.Frame(self._notebook, bg=C['base'])
+        self._notebook.add(panel, text='简历上下文（本地）')
+        controls = tk.Frame(panel, bg=C['base'])
+        controls.pack(fill=tk.X, padx=10, pady=10)
+        self._resume_import_btn = tk.Button(controls, text='导入 PDF / DOCX', command=self._import_resume,
+            bg=C['blue'], fg=C['base'], relief=tk.FLAT)
+        self._resume_import_btn.pack(side=tk.LEFT)
+        tk.Button(controls, text='清空简历上下文', command=self._clear_resume,
+            bg=C['surface1'], fg=C['text'], relief=tk.FLAT).pack(side=tk.LEFT, padx=12)
+        self._use_resume_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(panel, text='携带编辑后的简历上下文（真实回答时发送至 DeepSeek）',
+            variable=self._use_resume_var, command=self._context_changed,
+            bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
+            activebackground=C['base'], activeforeground=C['text']).pack(anchor='w', padx=10)
+        tk.Label(panel, text='自动移除常见电话、邮箱、标注姓名与链接，无法保证完整匿名。请手动删除姓名、单位等身份线索后再勾选。\n预览可编辑；最多 12000 字符。仅本次运行保存，不上传文件，不保存提取文本。',
+            wraplength=690, justify=tk.LEFT, bg=C['base'], fg=C['subtext']).pack(fill=tk.X, padx=10, pady=10)
+        self._resume_status_var = tk.StringVar(value='尚未导入简历；上下文关闭')
+        tk.Label(panel, textvariable=self._resume_status_var, bg=C['base'], fg=C['subtext']).pack(anchor='w', padx=10)
+        self._resume_box = scrolledtext.ScrolledText(panel, wrap=tk.WORD, bg=C['surface0'], fg=C['text'],
+            insertbackground=C['text'], selectbackground=C['blue'], selectforeground=C['base'], relief=tk.FLAT)
+        self._resume_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self._resume_box.bind('<<Modified>>', self._resume_edited)
+
+    def _context_changed(self):
+        if self.on_cancel_ai:
+            self.on_cancel_ai()
+
+    def _resume_edited(self, event=None):
+        if self._resume_box.edit_modified():
+            self._context_changed()
+            self._resume_box.edit_modified(False)
+
+    def _clear_resume(self):
+        self._resume_generation += 1
+        self._use_resume_var.set(False)
+        self._resume_box.delete('1.0', tk.END)
+        self._resume_status_var.set('简历上下文已清空')
+        self._context_changed()
+
+    def _import_resume(self):
+        if self._resume_busy:
+            return
+        path = filedialog.askopenfilename(parent=self.root, filetypes=[('简历文档', '*.pdf *.docx')])
+        if path:
+            self.import_resume_path(path)
+
+    def import_resume_path(self, path):
+        if self._resume_busy:
+            return
+        self._clear_resume()
+        generation = self._resume_generation
+        self._resume_busy = True
+        self._resume_import_btn.configure(state=tk.DISABLED)
+        self._resume_status_var.set('正在本地解析…')
+        def work():
+            try:
+                result = extract_resume(path)
+                event = (generation, result, None)
+            except ResumeError as exc:
+                event = (generation, None, str(exc))
+            self._update_q.put(('resume', event))
+        threading.Thread(target=work, daemon=True).start()
+
     def get_ai_settings(self, simulation=False):
         return DeepSeekSettings(api_key=self._api_key_var.get().strip(),
                                 model=self._ai_model_var.get(), max_tokens=int(self._ai_tokens_var.get()),
-                                simulation=simulation)
+                                simulation=simulation,
+                                resume_context=self._resume_box.get('1.0', tk.END).strip() if self._use_resume_var.get() else '')
 
     def get_current_text(self):
         return self._current_box.get('1.0', tk.END).strip()
@@ -583,7 +664,18 @@ class InterviewAssistantGUI:
         self.root.after(40, self._poll_updates)
 
     def _apply(self, action: str, value) -> None:
-        if action == "devices":
+        if action == 'resume':
+            generation, document, error = value
+            self._resume_busy = False
+            self._resume_import_btn.configure(state=tk.NORMAL)
+            if generation != self._resume_generation:
+                return
+            if error:
+                self._resume_status_var.set(error)
+            else:
+                self._resume_box.insert('1.0', document.text)
+                self._resume_status_var.set(f'已在本地提取 {len(document.text)} 字符；请检查预览，上下文仍关闭')
+        elif action == "devices":
             self._device_map = {}
             names: List[str] = []
             for dev in value:
