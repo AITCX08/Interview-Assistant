@@ -18,6 +18,7 @@ from transcriber import Transcriber, _detect_device
 from gui import InterviewAssistantGUI
 from ai_client import AIError, AnswerService, RoutingClient
 from credentials import CredentialError
+from question_gate import QuestionGate
 
 
 def _get_hw_info() -> str:
@@ -82,9 +83,11 @@ class InterviewAssistant:
         self._listening_generation = 0
         self._closed = False
         self._model_loading = False
+        self._question_gate = QuestionGate()
         self._transcriber = self._new_transcriber('zh', _detect_device())
         self._ai = AnswerService(RoutingClient(), self._gui.update_ai_event)
         self._audio.on_error = self._gui.set_status
+        self._audio.on_discontinuity = self._on_audio_discontinuity
 
         # Wire GUI callbacks
         self._gui.on_start        = self._start_listening
@@ -95,7 +98,11 @@ class InterviewAssistant:
         self._gui.on_apply_ai = self._apply_ai_config
         self._gui.on_simulate_ai = self._simulate_ai
         self._gui.on_transcript_received = self._accept_transcript
+        self._gui.on_segment_discarded = self._question_gate.reset
+        self._gui.on_partial_received = lambda generation: (not self._closed and self._listening
+                                                            and generation == self._listening_generation)
         self._gui.root.protocol('WM_DELETE_WINDOW', self._close)
+        self._gate_timer = self._gui.root.after(100, self._poll_question_gate)
 
         # Populate device list
         devices = AudioCapture.list_devices()
@@ -116,8 +123,18 @@ class InterviewAssistant:
 
     def _new_transcriber(self, language, device):
         return Transcriber(language=language, device=device,
-                           on_metrics=self._gui.update_asr_metrics, on_error=self._gui.set_status,
-                           reuse_resources=self._gui._reuse_resources_var.get())
+                           on_metrics=self._gui.update_asr_metrics, on_error=self._on_asr_error,
+                           reuse_resources=self._gui._reuse_resources_var.get(),
+                           streaming=self._gui._streaming_var.get(),
+                           on_partial=lambda text: self._gui._update_q.put(('partial', (text, self._listening_generation))))
+
+    def _on_asr_error(self, message):
+        self._gui._update_q.put(('segment_discarded', None))
+        self._gui.set_status(message)
+
+    def _on_audio_discontinuity(self):
+        self._transcriber.discard_utterance()
+        self._gui._update_q.put(('segment_discarded', None))
 
     def _load_model_bg(self, transcriber=None) -> None:
         """Load FunASR Paraformer in a background thread."""
@@ -142,6 +159,9 @@ class InterviewAssistant:
             self._stop_listening()
         lang   = self._gui.get_language()
         device = self._gui.get_compute_device()
+        if self._gui._streaming_var.get() and lang != 'zh':
+            self._gui.set_status('流式模式目前仅支持中文，请切回整句模式后重载')
+            return
         self._gui.set_status(f"⏳ 正在重新加载模型（{lang} / {device}）…")
         self._transcriber.close()
         self._transcriber = self._new_transcriber(lang, device)
@@ -153,7 +173,9 @@ class InterviewAssistant:
     # ------------------------------------------------------------------
 
     def _start_listening(self) -> None:
-        if self._gui.get_language() != self._transcriber.language:
+        if (self._gui.get_language() != self._transcriber.language
+                or self._gui._streaming_var.get() != self._transcriber.streaming
+                or self._gui.get_compute_device() != self._transcriber._device):
             self._reload_model()
             return
         if not self._transcriber.is_loaded:
@@ -166,6 +188,7 @@ class InterviewAssistant:
             self._gui.get_vad_silence(),
         )
         self._transcriber.reset_vad()
+        self._question_gate.reset()
         self._listening_generation += 1
         generation = self._listening_generation
         transcriber = self._transcriber
@@ -193,6 +216,8 @@ class InterviewAssistant:
         self._listening_generation += 1
         self._audio.stop()
         self._transcriber.reset_vad()
+        self._question_gate.reset()
+        self._gui._partial_var.set('')
         self._listening = False
         self._gui.set_listening(False)
         self._gui.update_volume(0.0)
@@ -210,8 +235,25 @@ class InterviewAssistant:
         if self._closed or not self._listening or generation != self._listening_generation:
             return False
         if self._gui._auto_ai_var.get():
-            self._start_ai(text)
+            if self._gui._question_gate_var.get():
+                question = self._question_gate.push(text)
+                if question:
+                    self._start_ai(question)
+            else:
+                self._question_gate.reset()
+                self._start_ai(text)
         return True
+
+    def _poll_question_gate(self):
+        if self._closed:
+            return
+        if self._listening and self._gui._auto_ai_var.get() and self._gui._question_gate_var.get():
+            question = None if self._transcriber.has_pending_speech else self._question_gate.poll()
+            if question:
+                self._start_ai(question)
+        else:
+            self._question_gate.reset()
+        self._gate_timer = self._gui.root.after(100, self._poll_question_gate)
 
     def _apply_ai_config(self):
         try:
@@ -237,6 +279,7 @@ class InterviewAssistant:
         self._start_ai(self._gui.get_current_text() or '请说明一个项目的实现思路。', simulation=True)
 
     def _cancel_ai(self):
+        self._question_gate.reset()
         self._ai.cancel()
         self._gui.invalidate_ai_request()
 
@@ -244,6 +287,7 @@ class InterviewAssistant:
         if self._closed:
             return
         self._closed = True
+        self._gui.root.after_cancel(self._gate_timer)
         self._stop_listening()
         self._transcriber.close()
         self._ai.close()

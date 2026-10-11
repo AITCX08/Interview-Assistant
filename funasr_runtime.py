@@ -1,6 +1,6 @@
 """Avoid repeatedly copying read-only FunASR 1.3.1 resources.
 
-Audited offline Paraformer/FSMN/CT-punc path: frontend cache is passed in a
+Audited Paraformer (offline/streaming), FSMN and CT-punc paths: frontend cache is passed in a
 fresh runtime dictionary; frontend CMVN and tokenizer tables are read-only.
 Unknown objects retain deepcopy semantics. No upstream files are modified.
 """

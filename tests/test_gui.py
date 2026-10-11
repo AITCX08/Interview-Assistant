@@ -60,6 +60,7 @@ class GUITests(unittest.TestCase):
         app._listening = True
         app._listening_generation = 5
         with patch.object(app, '_start_ai') as start:
+            app._gui._question_gate_var.set(False)
             app._accept_transcript('模拟问题', 5)
             start.assert_not_called()
             app._gui._auto_ai_var.set(True)
@@ -99,6 +100,7 @@ class GUITests(unittest.TestCase):
         app._listening = True
         app._listening_generation = 4
         app._gui._auto_ai_var.set(True)
+        app._gui._question_gate_var.set(False)
         app._gui._api_key_var.set('synthetic-test-key')
         class Model:
             def generate(self, **kwargs):
@@ -126,6 +128,51 @@ class GUITests(unittest.TestCase):
         self.assertIn('模拟 AI 回答', app._gui._answer_box.get('1.0', 'end'))
         self.assertEqual(requests[0]['messages'][-1]['content'], '合成音频问题')
         self.assertEqual(len(requests), 1)
+
+    def test_partial_never_triggers_and_stopped_partial_ignored(self):
+        self.gui.on_partial_received = lambda generation: generation == 3
+        called = []
+        self.gui.on_transcript_received = lambda *args: called.append(args)
+        self.gui._apply('partial', ('临时文字', 3))
+        self.assertIn('临时文字', self.gui._partial_var.get())
+        self.gui._apply('partial', ('旧文字', 2))
+        self.assertNotIn('旧文字', self.gui._partial_var.get())
+        self.assertEqual(called, [])
+        self.assertEqual(self.gui.get_current_text(), '')
+
+    def test_controller_gate_merges_skips_and_stop_clears(self):
+        import main
+        with patch('main._detect_device', return_value='cpu'), \
+             patch('gui._default_compute_device', return_value='cpu'), \
+             patch('main.AudioCapture.list_devices', return_value=[]):
+            app = main.InterviewAssistant()
+        app._gui.root.withdraw()
+        self.addCleanup(app._close)
+        app._listening = True
+        app._listening_generation = 7
+        app._gui._auto_ai_var.set(True)
+        with patch.object(app, '_start_ai') as start:
+            app._accept_transcript('好的', 7)
+            start.assert_not_called()
+            app._accept_transcript('请解释缓存，以及', 7)
+            start.assert_not_called()
+            app._accept_transcript('如何解决缓存击穿', 7)
+            start.assert_called_once_with('请解释缓存，以及如何解决缓存击穿')
+            app._accept_transcript('请介绍你的项目，以及', 7)
+            app._stop_listening()
+            self.assertIsNone(app._question_gate.poll(time.monotonic() + 10))
+
+    def test_segment_error_discards_waiting_question(self):
+        import main
+        with patch('main._detect_device', return_value='cpu'), \
+             patch('gui._default_compute_device', return_value='cpu'), \
+             patch('main.AudioCapture.list_devices', return_value=[]):
+            app = main.InterviewAssistant()
+        app._gui.root.withdraw()
+        self.addCleanup(app._close)
+        app._question_gate.push('请解释缓存，以及')
+        app._gui._apply('segment_discarded', None)
+        self.assertIsNone(app._question_gate.poll(time.monotonic() + 10))
 
     def test_resume_explicit_opt_in_and_stale_result(self):
         from resume_context import ResumeDocument

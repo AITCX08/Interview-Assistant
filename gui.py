@@ -98,6 +98,8 @@ class InterviewAssistantGUI:
         self.on_apply_ai = None
         self.on_simulate_ai = None
         self.on_transcript_received = None
+        self.on_partial_received = None
+        self.on_segment_discarded = None
         self._active_ai_request = None
         self._closing = False
 
@@ -369,7 +371,7 @@ class InterviewAssistantGUI:
         tk.Checkbutton(settings, text='识别完成后自动生成建议（上传当前语音段文字到 DeepSeek）',
             variable=self._auto_ai_var, bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
             activebackground=C['base'], activeforeground=C['text']).grid(row=3, column=0, columnspan=3, sticky='w', padx=8, pady=8)
-        tk.Label(settings, text='默认非思考模式、流式输出。自动模式仅发送新语音段；手动模式发送当前转写区文字。',
+        tk.Label(settings, text='默认非思考模式、流式输出。自动模式可判定并合并问题；手动模式发送当前转写区文字。',
             bg=C['base'], fg=C['subtext'], wraplength=660, justify=tk.LEFT).grid(row=4, column=0, columnspan=3, sticky='w', padx=8, pady=(0, 8))
         buttons = tk.Frame(self._ai_tab, bg=C['base'])
         buttons.pack(fill=tk.X, padx=10)
@@ -501,6 +503,8 @@ class InterviewAssistantGUI:
                  font=("Helvetica", 10)).pack(side=tk.LEFT)
         self._compute_device_var = tk.StringVar(value=_default_compute_device())
         self._reuse_resources_var = tk.BooleanVar(value=True)
+        self._question_gate_var = tk.BooleanVar(value=True)
+        self._streaming_var = tk.BooleanVar(value=False)
         ttk.Combobox(
             row1, textvariable=self._compute_device_var,
             values=["cpu", "cuda"],
@@ -518,6 +522,18 @@ class InterviewAssistantGUI:
 
         row2 = tk.Frame(mf, bg=C["base"])
         row2.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        mode_row = tk.Frame(mf, bg=C['base'])
+        mode_row.pack(fill=tk.X, padx=10, pady=4)
+        tk.Checkbutton(mode_row, text='中文流式识别（重载生效）', variable=self._streaming_var,
+                       bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
+                       activebackground=C['base'], activeforeground=C['text']).pack(side=tk.LEFT)
+        tk.Checkbutton(mode_row, text='仅完整问题自动回答', variable=self._question_gate_var,
+                       bg=C['base'], fg=C['text'], selectcolor=C['surface0'],
+                       activebackground=C['base'], activeforeground=C['text']).pack(side=tk.LEFT, padx=10)
+        self._partial_var = tk.StringVar(value='')
+        tk.Label(mf, textvariable=self._partial_var, bg=C['base'], fg=C['text'],
+                 anchor='w', wraplength=560).pack(fill=tk.X, padx=10)
 
         tk.Label(row2, text="静音阈值:", bg=C["base"], fg=C["text"],
                  font=("Helvetica", 9)).pack(side=tk.LEFT)
@@ -728,6 +744,17 @@ class InterviewAssistantGUI:
                 return
             self._current_box.insert(tk.END, text + "\n")
             self._current_box.see(tk.END)
+
+        elif action == 'partial':
+            text, generation = value
+            if self.on_partial_received and not self.on_partial_received(generation):
+                return
+            self._partial_var.set(('识别中：' + text[-180:]) if text else '')
+
+        elif action == 'segment_discarded':
+            self._partial_var.set('')
+            if self.on_segment_discarded:
+                self.on_segment_discarded()
 
         elif action == 'asr_metrics':
             self._asr_metrics_var.set(f"识别：排队 {value['queue_ms']:.0f} ms / 推理 {value['inference_ms']:.0f} ms")

@@ -118,3 +118,21 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 capture.start()
         self.assertFalse(capture.is_capturing)
+
+    def test_driver_overflow_reports_discontinuity_off_callback(self):
+        capture = AudioCapture()
+        self.addCleanup(capture.stop)
+        notified = threading.Event()
+        capture.on_discontinuity = notified.set
+        class FakeStream:
+            def __init__(self, **kwargs): self.callback = kwargs['callback']
+            def start(self): pass
+            def stop(self): pass
+            def close(self): pass
+        class Overflow:
+            input_overflow = True
+        with patch('audio_capture.sd.InputStream', FakeStream):
+            capture.start(callback=lambda _: None)
+            capture._stream.callback(np.ones((1600, 1), np.float32), 1600, None, Overflow())
+            self.assertTrue(notified.wait(1))
+            self.assertEqual(capture.input_overflows, 1)

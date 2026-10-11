@@ -40,6 +40,8 @@ class AudioCapture:
         self._worker = None
         self._stop_event = threading.Event()
         self.dropped_chunks = 0
+        self.input_overflows = 0
+        self.on_discontinuity = lambda: None
         self.on_error = lambda _: None
 
     # ------------------------------------------------------------------
@@ -115,12 +117,16 @@ class AudioCapture:
         if self.is_capturing:
             return
 
+        self.dropped_chunks = 0
+        self.input_overflows = 0
         self._stop_event = threading.Event()
         stop_event = self._stop_event
 
         def _sd_callback(indata, frames, time_info, status):
             if not self.is_capturing or stop_event.is_set():
                 return
+            if status and getattr(status, 'input_overflow', False):
+                self.input_overflows += 1
             mono = indata[:, 0].astype(np.float32, copy=True)
             try:
                 self.audio_queue.put_nowait(mono)
@@ -137,6 +143,7 @@ class AudioCapture:
 
         def dispatch():
             last_dropped = 0
+            last_overflows = 0
             while not stop_event.is_set():
                 try:
                     mono = self.audio_queue.get(timeout=.1)
@@ -145,9 +152,11 @@ class AudioCapture:
                 if stop_event.is_set():
                     break
                 try:
-                    if self.dropped_chunks > last_dropped:
+                    if self.dropped_chunks > last_dropped or self.input_overflows > last_overflows:
                         last_dropped = self.dropped_chunks
-                        self.on_error('音频处理积压，已丢弃过期音频块')
+                        last_overflows = self.input_overflows
+                        self.on_discontinuity()
+                        self.on_error('音频输入中断或积压，本句已丢弃，请检查输入设备和推理速度')
                     if callback:
                         callback(mono)
                 except Exception:
